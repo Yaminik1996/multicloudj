@@ -5,6 +5,7 @@ import com.google.protobuf.util.Timestamps;
 import com.salesforce.multicloudj.common.exceptions.InvalidArgumentException;
 import com.salesforce.multicloudj.common.exceptions.ResourceAlreadyExistsException;
 import com.salesforce.multicloudj.common.exceptions.ResourceNotFoundException;
+import com.salesforce.multicloudj.common.exceptions.TransactionFailedException;
 import com.salesforce.multicloudj.common.util.common.TestsUtil;
 import com.salesforce.multicloudj.docstore.driver.AbstractDocStore;
 import com.salesforce.multicloudj.docstore.driver.ActionList;
@@ -12,6 +13,7 @@ import com.salesforce.multicloudj.docstore.driver.Document;
 import com.salesforce.multicloudj.docstore.driver.DocumentIterator;
 import com.salesforce.multicloudj.docstore.driver.FilterOperation;
 import com.salesforce.multicloudj.docstore.driver.Util;
+import com.salesforce.multicloudj.docstore.driver.PaginationToken;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -48,9 +50,6 @@ public abstract class AbstractDocstoreIT {
         // provide the STS endpoint in provider
         String getDocstoreEndpoint();
 
-        // provide the provider ID
-        String getProviderId();
-
         // Wiremock server need the https port, if
         // we make it constant at abstract class, we won't be able
         // to run tests in parallel. Each provider can provide the
@@ -60,6 +59,13 @@ public abstract class AbstractDocstoreIT {
         // If you need to provide extensions to wiremock proxy
         // provide the fully qualified class names here.
         List<String> getWiremockExtensions();
+
+        // Method to check if the provider supports OrderBy in full table scans
+        // Returns true if the provider can handle OrderBy clauses during full table scans,
+        // false if it requires an index or fallback mechanism
+        default boolean supportOrderByInFullScan() {
+            return false;
+        }
     }
 
     protected abstract Harness createHarness();
@@ -137,11 +143,6 @@ public abstract class AbstractDocstoreIT {
     public void testCreate() {
         AbstractDocStore docStore = harness.createDocstoreDriver(CollectionKind.SINGLE_KEY);
         DocStoreClient docStoreClient = new DocStoreClient(docStore);
-        // Temporarily don't assert on gcp firestore unless we have the
-        // get implementation
-        if (docStoreClient.docStore.getProviderId().equals("gcp-firestore")) {
-            return;
-        }
         class TestCase {
             final String name;
             final Object doc;
@@ -259,11 +260,6 @@ public abstract class AbstractDocstoreIT {
     public void testGet() {
         AbstractDocStore docStore = harness.createDocstoreDriver(CollectionKind.SINGLE_KEY);
         DocStoreClient docStoreClient = new DocStoreClient(docStore);
-        // Temporarily don't assert on gcp firestore unless we have the
-        // get implementation
-        if (docStoreClient.docStore.getProviderId().equals("gcp-firestore")) {
-            return;
-        }
         class TestCase {
             final String name;
             final Object doc;
@@ -564,11 +560,6 @@ public abstract class AbstractDocstoreIT {
     public void testReplace() {
         AbstractDocStore docStore = harness.createDocstoreDriver(CollectionKind.SINGLE_KEY);
         DocStoreClient docStoreClient = new DocStoreClient(docStore);
-        // Temporarily don't assert on gcp firestore unless we have the
-        // get implementation
-        if (docStoreClient.docStore.getProviderId().equals("gcp-firestore")) {
-            return;
-        }
         class TestCase {
             final String name;
             final Object origDoc;
@@ -674,11 +665,6 @@ public abstract class AbstractDocstoreIT {
     public void testGetQuery() {
         AbstractDocStore docStore = harness.createDocstoreDriver(CollectionKind.TWO_KEYS);
         DocStoreClient docStoreClient = new DocStoreClient(docStore);
-        // Temporarily don't assert on gcp firestore unless we have the
-        // get implementation
-        if (docStoreClient.docStore.getProviderId().equals("gcp-firestore")) {
-            return;
-        }
         // Create test data
         List<HighScore> allScores = List.of(
                 new HighScore(game1, "pat", 49, "2024-03-13", false),
@@ -691,7 +677,7 @@ public abstract class AbstractDocstoreIT {
                 new HighScore(game2, "fran", 33, "2024-03-20", false)
         );
         for (HighScore score : allScores) {
-            docStoreClient.create(new Document(score));
+            docStoreClient.put(new Document(score));
         }
 
         // 1. Query all
@@ -763,17 +749,28 @@ public abstract class AbstractDocstoreIT {
         List<HighScore> withGlitchNotIns = getQueryResult(iter12);
         Assertions.assertEquals(6, withGlitchNotIns.size());
 
-        // 13. query all order by player (SK) asc, should fail because full scans with order by are not allowed
-        Assertions.assertThrows(
-                InvalidArgumentException.class,
-                () -> docStoreClient.query().orderBy("Player", true).get()
-        );
+        // 13. query all order by player (SK) asc, should fail because full scans with order by are not allowe
+        if (harness.supportOrderByInFullScan()) {
+            Assertions.assertDoesNotThrow(() -> docStoreClient.query().orderBy("Player", true).get()
+            );
+        } else {
+            Assertions.assertThrows(
+                    InvalidArgumentException.class,
+                    () -> docStoreClient.query().orderBy("Player", true).get()
+            );
+        }
+
 
         // 14. query all order by player desc, should fail because full scans with order by are not allowed
-        Assertions.assertThrows(
-                InvalidArgumentException.class,
-                () -> docStoreClient.query().orderBy("Player", false).get()
-        );
+        if (harness.supportOrderByInFullScan()) {
+            Assertions.assertDoesNotThrow(() -> docStoreClient.query().orderBy("Player", false).get()
+            );
+        } else {
+            Assertions.assertThrows(
+                    InvalidArgumentException.class,
+                    () -> docStoreClient.query().orderBy("Player", false).get()
+            );
+        }
 
         // 15. Test for valid order by clause.
         DocumentIterator iter15 = docStoreClient.query().where("Game", FilterOperation.EQUAL, game1)
@@ -781,6 +778,85 @@ public abstract class AbstractDocstoreIT {
                 .orderBy("Player", true).get();
         List<HighScore> gamePlayerAsc = getQueryResult(iter15);
         Assertions.assertEquals(4, gamePlayerAsc.size());
+
+// The following tests currently are only enabled for AWS.
+        if (!docStoreClient.docStore.getProviderId().equals("aws")) {
+            docStoreClient.close();
+            return;
+        }
+
+        // 16. Test query table with pagination token. Result contains 1 full page and 1 half page.
+        DocumentIterator iter16 = docStoreClient.query().where("Game", FilterOperation.EQUAL, game2)
+                .where("Player", FilterOperation.GREATER_THAN, "billie").limit(2).get();
+        List<HighScore> gamePlayerScore = getQueryResult(iter16);
+        Assertions.assertEquals(2, gamePlayerScore.size());
+        PaginationToken paginationToken = iter16.getPaginationToken();
+        Assertions.assertFalse(paginationToken.isEmpty());
+
+        iter16 = docStoreClient.query()
+                .where("Game", FilterOperation.EQUAL, game2)
+                .where("Player", FilterOperation.GREATER_THAN, "billie").paginationToken(paginationToken).limit(2).get();
+        gamePlayerScore = getQueryResult(iter16);
+        Assertions.assertEquals(1, gamePlayerScore.size());
+        Assertions.assertEquals("pat", gamePlayerScore.get(0).Player);
+        paginationToken = iter16.getPaginationToken();
+        Assertions.assertTrue(paginationToken.isEmpty());
+
+        // 17. Test query table with pagination token. Result contains only 1 page.
+        DocumentIterator iter17 = docStoreClient.query().where("Game", FilterOperation.EQUAL, game1)
+                .where("Player", FilterOperation.GREATER_THAN, "andy").offset(1).limit(2).get();
+        List<HighScore> highScores = getQueryResult(iter17);
+        Assertions.assertEquals(2, highScores.size());
+        Assertions.assertEquals("mel", highScores.get(0).Player);
+        paginationToken = iter17.getPaginationToken();
+        Assertions.assertTrue(paginationToken.isEmpty());
+
+        // 18. Test scan table with pagination token. Result contains 2 full pages.
+        DocumentIterator iter18 = docStoreClient.query().where("Game", FilterOperation.EQUAL, game2)
+                .where("WithGlitch", FilterOperation.EQUAL, false).offset(0).limit(1).get();
+        highScores = getQueryResult(iter18);
+        Assertions.assertEquals(1, highScores.size());
+        paginationToken = iter18.getPaginationToken();
+        Assertions.assertFalse(paginationToken.isEmpty());
+
+        iter18 = docStoreClient.query().where("Game", FilterOperation.EQUAL, game2)
+                .where("WithGlitch", FilterOperation.EQUAL, false).paginationToken(paginationToken).limit(1).get();
+        highScores = getQueryResult(iter18);
+        Assertions.assertEquals(1, highScores.size());
+        Assertions.assertEquals("fran", highScores.get(0).Player);
+
+        // 19. Test query from local index with pagination token. Result contains 1 full page and 1 half page.
+        DocumentIterator iter19 = docStoreClient.query().where("Game", FilterOperation.EQUAL, game2)
+                .where("Score", FilterOperation.GREATER_THAN, 100).limit(2).get();
+        highScores = getQueryResult(iter19);
+        Assertions.assertEquals(2, highScores.size());
+        paginationToken = iter19.getPaginationToken();
+        Assertions.assertFalse(paginationToken.isEmpty());
+
+        iter19 = docStoreClient.query()
+                .where("Game", FilterOperation.EQUAL, game2)
+                .where("Score", FilterOperation.GREATER_THAN, 100).paginationToken(paginationToken).limit(2).get();
+        highScores = getQueryResult(iter19);
+        Assertions.assertEquals(1, highScores.size());
+        Assertions.assertEquals("mel", highScores.get(0).Player);
+        paginationToken = iter19.getPaginationToken();
+        Assertions.assertTrue(paginationToken.isEmpty());
+
+        // 20. Test query from global index with pagination token. Result contains 2 full pages.
+        DocumentIterator iter20 = docStoreClient.query().where("Player", FilterOperation.EQUAL, "mel")
+                .where("Time", FilterOperation.GREATER_THAN, "2024-02-01").limit(1).get();
+        highScores = getQueryResult(iter20);
+        Assertions.assertEquals(1, highScores.size());
+        paginationToken = iter20.getPaginationToken();
+        Assertions.assertFalse(paginationToken.isEmpty());
+
+        iter20 = docStoreClient.query()
+                .where("Player", FilterOperation.EQUAL, "mel")
+                .where("Time", FilterOperation.GREATER_THAN, "2024-02-01").paginationToken(paginationToken).limit(1).get();
+        highScores = getQueryResult(iter20);
+        Assertions.assertEquals(1, highScores.size());
+        Assertions.assertEquals("2024-04-18", highScores.get(0).Time);
+        
         docStoreClient.close();
     }
 
@@ -808,4 +884,191 @@ public abstract class AbstractDocstoreIT {
     private static String game1 = "Praise All Monsters";
     private static String game2 = "Zombie DMV";
     private static String game3 = "Days Gone";
+
+    @Test
+    public void testAtomicWrites() {
+        AbstractDocStore docStore = harness.createDocstoreDriver(CollectionKind.SINGLE_KEY);
+        DocStoreClient docStoreClient = new DocStoreClient(docStore);
+        String revField = "DocstoreRevision";
+        
+        // Create 9 test documents following the Go pattern
+        List<Map<String, Object>> docs = new ArrayList<>();
+        for (int i = 0; i < 9; i++) {
+            Map<String, Object> doc = new HashMap<>();
+            doc.put("pName", String.format("testAtomicWrites%d", i));
+            doc.put("s", String.valueOf(i));
+            doc.put("i", i);
+            //doc.put("f", (float) (i+.10*i));
+            doc.put("b", i % 2 == 0);
+            doc.put(revField, null);
+            docs.add(doc);
+        }
+
+        // Put the nine docs
+        ActionList actions = docStoreClient.getActions();
+        for (int i = 0; i < 9; i++) {
+            actions.create(new Document(docs.get(i)));
+        }
+        actions.run();
+
+        // Verify all documents were created and have revision fields
+        for (Map<String, Object> doc : docs) {
+            verifyRevisionFieldExist(doc, revField);
+        }
+
+        // Delete the first three, get the second three, and update last three atomically
+        // Prepare get documents
+        List<Map<String, Object>> getDocs = new ArrayList<>();
+        for (int i = 3; i < 6; i++) {
+            Map<String, Object> getDoc = new HashMap<>();
+            getDoc.put("pName", docs.get(i).get("pName"));
+            getDocs.add(getDoc);
+        }
+
+        actions = docStoreClient.getActions();
+        // Get operations
+        actions.get(new Document(getDocs.get(0)));
+        // Delete operations
+        actions.delete(new Document(docs.get(0)));
+        actions.delete(new Document(docs.get(1)));
+        actions.get(new Document(getDocs.get(1)));
+        actions.delete(new Document(docs.get(2)));
+        actions.get(new Document(getDocs.get(2)));
+        
+        // Enable atomic writes for the following operations
+        actions.enableAtomicWrites();
+        Map t6 = docs.get(6);
+        t6.put("s", "66");
+        actions.put(new Document(t6));
+        Map t7 = docs.get(7);
+        t7.put("s", "77");
+        actions.put(new Document(t7));
+        Map t8 = docs.get(8);
+        t8.put("s", "88");
+        actions.put(new Document(t8));
+        actions.run();
+
+        // Verify get documents contain the expected data
+        for (int i = 0; i < 3; i++) {
+            Map<String, Object> expected = docs.get(i + 3);
+            Map<String, Object> actual = getDocs.get(i);
+            // The get operation should have populated these documents
+            Assertions.assertEquals(expected.get("pName"), actual.get("pName"));
+            Assertions.assertEquals(expected.get("s"), actual.get("s"));
+            Assertions.assertEquals(expected.get("i"), actual.get("i"));
+            //Assertions.assertEquals(expected.get("f"), actual.get("f"));
+            Assertions.assertEquals(expected.get("b"), actual.get("b"));
+            Assertions.assertNotNull(actual.get(revField));
+        }
+
+        // Get the docs updated as part of atomic writes and verify values were updated successfully
+        Map<String, Object> doc6 = new HashMap<>();
+        doc6.put("pName", docs.get(6).get("pName"));
+        docStoreClient.get(new Document(doc6));
+        Assertions.assertEquals("66", doc6.get("s"));
+
+        Map<String, Object> doc7 = new HashMap<>();
+        doc7.put("pName", docs.get(7).get("pName"));
+        docStoreClient.get(new Document(doc7));
+        Assertions.assertEquals("77", doc7.get("s"));
+
+        Map<String, Object> doc8 = new HashMap<>();
+        doc8.put("pName", docs.get(8).get("pName"));
+        docStoreClient.get(new Document(doc8));
+        Assertions.assertEquals("88", doc8.get("s"));
+
+        docStoreClient.close();
+    }
+
+    @Test
+    public void testAtomicWritesFail() {
+        AbstractDocStore docStore = harness.createDocstoreDriver(CollectionKind.SINGLE_KEY);
+        DocStoreClient docStoreClient = new DocStoreClient(docStore);
+        String revField = "DocstoreRevision";
+        
+        // Create 9 test documents but only put the first 8 (doc8 won't exist)
+        List<Map<String, Object>> docs = new ArrayList<>();
+        for (int i = 0; i < 9; i++) {
+            Map<String, Object> doc = new HashMap<>();
+            doc.put("pName", String.format("testAtomicWritesFail%d", i));
+            doc.put("s", String.valueOf(i));
+            doc.put("i", i);
+            doc.put("f", (float) (i+.10*i));
+            doc.put("b", i % 2 == 0);
+            doc.put(revField, null);
+            docs.add(doc);
+        }
+
+        // Put only the first eight docs (docs[8] doesn't exist)
+        ActionList actions = docStoreClient.getActions();
+        for (int i = 0; i < 8; i++) {
+            actions.create(new Document(docs.get(i)));
+        }
+        actions.run();
+
+        // Verify first 8 documents were created and have revision fields
+        for (int i = 0; i < 8; i++) {
+            verifyRevisionFieldExist(docs.get(i), revField);
+        }
+
+        // Delete the first three, get the second three, and update last three atomically
+        // Prepare get documents
+        List<Map<String, Object>> getDocs = new ArrayList<>();
+        for (int i = 3; i < 6; i++) {
+            Map<String, Object> getDoc = new HashMap<>();
+            getDoc.put("pName", docs.get(i).get("pName"));
+            getDocs.add(getDoc);
+        }
+
+        actions = docStoreClient.getActions();
+        // Get operations
+        actions.get(new Document(getDocs.get(0)));
+        // Delete operations
+        actions.delete(new Document(docs.get(0)));
+        actions.delete(new Document(docs.get(1)));
+        actions.get(new Document(getDocs.get(1)));
+        actions.delete(new Document(docs.get(2)));
+        actions.get(new Document(getDocs.get(2)));
+
+        // Atomic writes operations - the last one will fail because docs[8] doesn't exist
+        actions.enableAtomicWrites();
+        Map t6 = docs.get(6);
+        t6.put("s", "66");
+        actions.put(new Document(t6));
+        Map t7 = docs.get(7);
+        t7.put("s", "77");
+        actions.put(new Document(t7));
+        Map t8 = docs.get(8);
+        t8.put(revField, "88");
+        actions.put(new Document(t8));
+
+        // The atomic transaction should fail
+        Assertions.assertThrows(TransactionFailedException.class, actions::run);
+
+        // Verify get documents still contain the expected data (from before the failed transaction)
+        for (int i = 0; i < 3; i++) {
+            Map<String, Object> expected = docs.get(i + 3);
+            Map<String, Object> actual = getDocs.get(i);
+            // The get operation should have populated these documents
+            Assertions.assertEquals(expected.get("pName"), actual.get("pName"));
+            Assertions.assertEquals(expected.get("s"), actual.get("s"));
+            Assertions.assertEquals(expected.get("i"), actual.get("i"));
+            Assertions.assertEquals(expected.get("f"), actual.get("f"));
+            Assertions.assertEquals(expected.get("b"), actual.get("b"));
+            Assertions.assertNotNull(actual.get(revField));
+        }
+
+        // Validate that the values still remain the original (atomic rollback)
+        Map<String, Object> doc6 = new HashMap<>();
+        doc6.put("pName", docs.get(6).get("pName"));
+        docStoreClient.get(new Document(doc6));
+        Assertions.assertEquals("6", doc6.get("s")); // Should still be original value
+
+        Map<String, Object> doc7 = new HashMap<>();
+        doc7.put("pName", docs.get(7).get("pName"));
+        docStoreClient.get(new Document(doc7));
+        Assertions.assertEquals("7", doc7.get("s")); // Should still be original value
+
+        docStoreClient.close();
+    }
 }

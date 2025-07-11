@@ -1,5 +1,6 @@
 package com.salesforce.multicloudj.docstore.gcp;
 
+import com.google.api.gax.rpc.AbortedException;
 import com.google.api.gax.rpc.ApiException;
 import com.google.api.gax.rpc.StatusCode;
 import com.google.auth.oauth2.GoogleCredentials;
@@ -11,12 +12,16 @@ import com.google.firestore.v1.CommitRequest;
 import com.google.firestore.v1.CommitResponse;
 import com.google.firestore.v1.DocumentMask;
 import com.google.firestore.v1.Precondition;
+import com.google.firestore.v1.RunQueryRequest;
+import com.google.firestore.v1.StructuredQuery;
+import com.google.firestore.v1.Value;
 import com.google.firestore.v1.Write;
 import com.google.protobuf.Timestamp;
 import com.salesforce.multicloudj.common.exceptions.InvalidArgumentException;
 import com.salesforce.multicloudj.common.exceptions.ResourceAlreadyExistsException;
 import com.salesforce.multicloudj.common.exceptions.ResourceNotFoundException;
 import com.salesforce.multicloudj.common.exceptions.SubstrateSdkException;
+import com.salesforce.multicloudj.common.exceptions.TransactionFailedException;
 import com.salesforce.multicloudj.common.exceptions.UnknownException;
 import com.salesforce.multicloudj.docstore.client.Query;
 import com.salesforce.multicloudj.docstore.driver.AbstractDocStore;
@@ -24,7 +29,10 @@ import com.salesforce.multicloudj.docstore.driver.Action;
 import com.salesforce.multicloudj.docstore.driver.ActionKind;
 import com.salesforce.multicloudj.docstore.driver.Document;
 import com.salesforce.multicloudj.docstore.driver.DocumentIterator;
+import com.salesforce.multicloudj.docstore.driver.Filter;
+import com.salesforce.multicloudj.docstore.driver.FilterOperation;
 import com.salesforce.multicloudj.docstore.driver.Util;
+import com.salesforce.multicloudj.docstore.driver.PaginationToken;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -177,10 +185,14 @@ public class FSDocStore extends AbstractDocStore {
     @Override
     public Key getKey(Document document) {
         // In Firestore, the document ID is the primary key.
-        // Assuming the partition key field holds the document ID.
+        // To simulate PK + SK pattern, we can concat them together to form
+        // a single document ID.
         String docId = (String) document.getField(collectionOptions.getPartitionKey());
         if (docId == null || docId.isEmpty()) {
             throw new IllegalArgumentException("Document ID (partitionKey) cannot be null or empty for Firestore");
+        }
+        if (collectionOptions.getSortKey() != null && document.getField(collectionOptions.getSortKey()) != null) {
+            docId += ":" + document.getField(collectionOptions.getSortKey());
         }
         return new Key(docId);
     }
@@ -244,9 +256,11 @@ public class FSDocStore extends AbstractDocStore {
     }
 
     /**
-     * Processes non-atomic write operations in a single batch.
+     * Processes non-atomic write operations in batches.
      * <p>
      * Batches compatible write operations together for improved performance.
+     * Unlike atomic writes, these may be split into multiple commits for optimization.
+     * Each individual batch is atomic, but there's no atomicity guarantee across batches.
      *
      * @param writes List of write actions to process
      * @param beforeDo Optional callback executed before each write
@@ -264,8 +278,12 @@ public class FSDocStore extends AbstractDocStore {
 
         // Process each action and create write operations
         for (Action action : writes) {
-            // TODO remove this logic once all the actions are supported in firestore.
-            if (action.getKind() != ActionKind.ACTION_KIND_PUT && action.getKind() != ActionKind.ACTION_KIND_REPLACE) {
+            // Handle all write action types: PUT, REPLACE, CREATE, DELETE, UPDATE
+            if (action.getKind() != ActionKind.ACTION_KIND_PUT && 
+                action.getKind() != ActionKind.ACTION_KIND_REPLACE &&
+                action.getKind() != ActionKind.ACTION_KIND_CREATE &&
+                action.getKind() != ActionKind.ACTION_KIND_DELETE &&
+                action.getKind() != ActionKind.ACTION_KIND_UPDATE) {
                 continue;
             }
 
@@ -279,8 +297,16 @@ public class FSDocStore extends AbstractDocStore {
             // Get the full document path
             String documentPath = getDocumentPath(key.getDocumentId());
 
-            // Create the write operation with the updated document
-            Write write = createPutWrite(action.getDocument(), documentPath, action.getKind());
+            // Create the appropriate write operation based on action kind
+            Write write;
+            if (action.getKind() == ActionKind.ACTION_KIND_DELETE) {
+                write = createDeleteWrite(action.getDocument(), documentPath, action.getKind());
+            } else if (action.getKind() == ActionKind.ACTION_KIND_UPDATE) {
+                write = createUpdateWrite(action.getDocument(), documentPath, action.getMods());
+            } else {
+                write = createPutWrite(action.getDocument(), documentPath, action.getKind());
+            }
+
             allWrites.add(write);
             writeToActionMap.put(writeIndex++, action);
         }
@@ -299,18 +325,21 @@ public class FSDocStore extends AbstractDocStore {
                 response = firestoreClient.commit(commitRequest);
             }  catch (ApiException e) {
                 // When a precondition fails, the error handling depends on the action type.
-                // Because we batch writes, we inspect only the first action’s kind to decide
+                // Because we batch writes, we inspect only the first action's kind to decide
                 // which exception to throw. This is always correct for a single-Do action.
-                // For multi-action batches, however, we can’t guarantee throwing the exact
+                // For multi-action batches, however, we can't guarantee throwing the exact
                 // exception for each individual action.
-                if (e.getCause().getMessage().contains("FAILED_PRECONDITION")) {
+                // It's a weird thing that firestore throws two different errors for precondition
+                // failures. For create with exists precondition, it aborts the transaction with Conflict.
+                if (e.getCause().getMessage().contains("FAILED_PRECONDITION")
+                || (e instanceof AbortedException && e.getMessage().equals("Conflict")) ) {
                     if (writes.get(0).getKind() == ActionKind.ACTION_KIND_CREATE) {
                         throw new ResourceAlreadyExistsException(e);
                     } else {
                         throw new ResourceNotFoundException(e);
                     }
                 }
-
+                throw e;
             }
 
             // Set the revision field in documents using the update time from the response
@@ -322,6 +351,28 @@ public class FSDocStore extends AbstractDocStore {
                 }
             }
         }
+    }
+
+    /**
+     * Creates a Write operation for a DELETE action.
+     *
+     * @param doc The document to delete
+     * @param documentPath Full path to the document
+     * @param actionKind The type of action being performed
+     * @return A Write operation for deletion
+     */
+    private Write createDeleteWrite(Document doc, String documentPath, ActionKind actionKind) {
+        // Create a delete operation
+        Write.Builder writeBuilder = Write.newBuilder()
+                .setDelete(documentPath);
+
+        // Add precondition based on action kind
+        Precondition precondition = buildPrecondition(doc, actionKind);
+        if (precondition != null) {
+            writeBuilder.setCurrentDocument(precondition);
+        }
+
+        return writeBuilder.build();
     }
 
     /**
@@ -392,6 +443,60 @@ public class FSDocStore extends AbstractDocStore {
     }
 
     /**
+     * Creates a Write operation for an UPDATE action with field modifications.
+     *
+     * @param doc The document to update
+     * @param documentPath Full path to the document
+     * @param mods Map of field modifications
+     * @return A Write operation for update
+     */
+    private Write createUpdateWrite(Document doc, String documentPath, Map<String, Object> mods) {
+        if (mods == null || mods.isEmpty()) {
+            // If no modifications, treat as a PUT operation
+            return createPutWrite(doc, documentPath, ActionKind.ACTION_KIND_PUT);
+        }
+
+        // Create the document with only the fields to update
+        com.google.firestore.v1.Document.Builder docBuilder = com.google.firestore.v1.Document.newBuilder()
+                .setName(documentPath);
+
+        // Create update mask with field paths
+        List<String> fieldPaths = new ArrayList<>();
+
+        for (Map.Entry<String, Object> entry : mods.entrySet()) {
+            String fieldPath = entry.getKey();
+            Object value = entry.getValue();
+            
+            fieldPaths.add(fieldPath);
+            
+            if (value != null) {
+                Value firestoreValue = FSCodec.encodeValue(value);
+                if (firestoreValue != null) {
+                    docBuilder.putFields(fieldPath, firestoreValue);
+                }
+            }
+        }
+
+        // Create update mask
+        DocumentMask updateMask = DocumentMask.newBuilder()
+                .addAllFieldPaths(fieldPaths)
+                .build();
+
+        // Create write operation
+        Write.Builder writeBuilder = Write.newBuilder()
+                .setUpdate(docBuilder.build())
+                .setUpdateMask(updateMask);
+
+        // Add precondition - for updates, we typically want the document to exist
+        Precondition precondition = buildPrecondition(doc, ActionKind.ACTION_KIND_UPDATE);
+        if (precondition != null) {
+            writeBuilder.setCurrentDocument(precondition);
+        }
+
+        return writeBuilder.build();
+    }
+
+    /**
      * Builds a precondition for write operations based on action kind and revision.
      *
      * @param doc The document
@@ -401,12 +506,24 @@ public class FSDocStore extends AbstractDocStore {
     private Precondition buildPrecondition(Document doc, ActionKind actionKind) {
         switch (actionKind) {
             case ACTION_KIND_CREATE:
+                // Precondition: the document doesn't already exist
                 return Precondition.newBuilder().setExists(false).build();
             case ACTION_KIND_REPLACE:
             case ACTION_KIND_UPDATE:
+                // Precondition: the revision matches, or if there is no revision, the document exists
+                Precondition revisionPrecondition = buildRevisionPrecondition(doc);
+                if (revisionPrecondition != null) {
+                    return revisionPrecondition;
+                }
+                // If no revision, just check that document exists
+                return Precondition.newBuilder().setExists(true).build();
             case ACTION_KIND_PUT:
             case ACTION_KIND_DELETE:
+                // Precondition: the revision matches, if any
                 return buildRevisionPrecondition(doc);
+            case ACTION_KIND_GET:
+                // No preconditions on a Get
+                return null;
             default:
                 throw new IllegalArgumentException("Invalid action kind: " + actionKind);
         }
@@ -436,58 +553,373 @@ public class FSDocStore extends AbstractDocStore {
      * Processes atomic writes using Firestore transactions.
      * <p>
      * Ensures that a set of operations either all succeed or all fail.
+     * Unlike batched writes which may be split into multiple commits for performance,
+     * atomic writes MUST be executed in a single commit to guarantee true atomicity.
      *
      * @param writes List of atomic write actions
      * @param beforeDo Optional callback executed before each write
      */
     private void runAtomicWrites(List<Action> writes, Consumer<Predicate<Object>> beforeDo) {
-        // Implementation for atomic writes using the low-level API
+        if (writes.isEmpty()) {
+            return;
+        }
+
+        // Build atomic write commit call following the Go pattern
+        AtomicWriteCommitCall atomicWriteCall = buildAtomicWritesCommitCall(writes, beforeDo);
+        
+        // Execute the atomic write commit call - MUST be a single commit
+        if (!atomicWriteCall.getWrites().isEmpty()) {
+            doAtomicCommitCall(atomicWriteCall);
+        }
+    }
+
+    /**
+     * Construct a commit call with all the atomic writes.
+     * This follows the Go Cloud pattern from buildAtomicWritesCommitCall.
+     * All writes MUST go into a single commit for true atomicity.
+     *
+     * @param actions List of atomic write actions
+     * @param beforeDo Optional callback executed before each write
+     * @return AtomicWriteCommitCall containing all writes to be committed atomically
+     */
+    private AtomicWriteCommitCall buildAtomicWritesCommitCall(List<Action> actions, Consumer<Predicate<Object>> beforeDo) {
+        List<Write> allWrites = new ArrayList<>();
+        List<Action> processedActions = new ArrayList<>();
+
+        for (Action action : actions) {
+            // Execute beforeDo callback for this action
+            if (beforeDo != null) {
+                Key key = getKey(action.getDocument());
+                beforeDo.accept(k -> k.equals(key));
+            }
+
+            // Convert action to write operations
+            Write write = actionToWrite(action);
+            if (write != null) {
+                allWrites.add(write);
+                processedActions.add(action);
+            }
+        }
+
+        return new AtomicWriteCommitCall(allWrites, processedActions);
+    }
+
+    /**
+     * Convert an action to a Firestore Write operation.
+     * This follows the Go Cloud pattern from actionToWrites.
+     *
+     * @param action The action to convert
+     * @return A Firestore Write operation
+     */
+    private Write actionToWrite(Action action) {
+        Key key = getKey(action.getDocument());
+        String documentPath = getDocumentPath(key.getDocumentId());
+
+        switch (action.getKind()) {
+            case ACTION_KIND_CREATE:
+                return createPutWrite(action.getDocument(), documentPath, action.getKind());
+                
+            case ACTION_KIND_REPLACE:
+                return createPutWrite(action.getDocument(), documentPath, action.getKind());
+                
+            case ACTION_KIND_PUT:
+                return createPutWrite(action.getDocument(), documentPath, action.getKind());
+                
+            case ACTION_KIND_UPDATE:
+                // For updates, we need to handle field modifications
+                return createUpdateWrite(action.getDocument(), documentPath, action.getMods());
+                
+            case ACTION_KIND_DELETE:
+                return createDeleteWrite(action.getDocument(), documentPath, action.getKind());
+                
+            default:
+                throw new IllegalArgumentException("Unknown action kind: " + action.getKind());
+        }
+    }
+
+    /**
+     * Execute the atomic write commit call.
+     * This follows the Go Cloud pattern from doCommitCall.
+     * CRITICAL: All writes must be in a single commit for atomicity.
+     *
+     * @param atomicWriteCall The atomic write commit call to execute
+     */
+    private void doAtomicCommitCall(AtomicWriteCommitCall atomicWriteCall) {
+        // CRITICAL: Create a single CommitRequest with ALL atomic writes
+        // This ensures true atomicity - all succeed or all fail together
+        CommitRequest commitRequest = CommitRequest.newBuilder()
+                .setDatabase(getDatabasePath())
+                .addAllWrites(atomicWriteCall.getWrites())
+                .build();
+
+        // Execute the commit request - if this fails, ALL writes are rolled back
+        CommitResponse response;
+        try {
+            response = firestoreClient.commit(commitRequest);
+        } catch (ApiException e) {
+            // Handle precondition failures and other errors
+            if (e.getCause() != null && e.getCause().getMessage().contains("FAILED_PRECONDITION")) {
+                // Determine which exception to throw based on the first action's kind
+                if (!atomicWriteCall.getActions().isEmpty()) {
+                    ActionKind firstActionKind = atomicWriteCall.getActions().get(0).getKind();
+                    if (firstActionKind == ActionKind.ACTION_KIND_CREATE) {
+                        throw new ResourceAlreadyExistsException("Atomic write failed: document already exists", e);
+                    } else {
+                        throw new ResourceNotFoundException("Atomic write failed: document not found", e);
+                    }
+                }
+            }
+            throw new TransactionFailedException("Atomic write failed - all operations rolled back", e);
+        }
+
+        // Update revision fields in all documents using the update time from the response
+        for (int i = 0; i < response.getWriteResultsCount() && i < atomicWriteCall.getActions().size(); i++) {
+            Action action = atomicWriteCall.getActions().get(i);
+            // TODO: When we support update, this will need to adapt the
+            // update being reflected in two items in write results
+            if (action.getDocument().hasField(getRevisionField())) {
+                Timestamp updateTime = response.getWriteResults(i).getUpdateTime();
+                action.getDocument().setField(getRevisionField(), updateTime);
+            }
+        }
+    }
+
+    /**
+     * Helper class to hold atomic write commit call information.
+     * This follows the Go Cloud pattern from commitCall struct.
+     */
+    private static class AtomicWriteCommitCall {
+        private final List<Write> writes;
+        private final List<Action> actions;
+
+        public AtomicWriteCommitCall(List<Write> writes, List<Action> actions) {
+            this.writes = writes;
+            this.actions = actions;
+        }
+
+        public List<Write> getWrites() {
+            return writes;
+        }
+
+        public List<Action> getActions() {
+            return actions;
+        }
+    }
+
+    /**
+     * Plans a Firestore structured query based on the provided query parameters.
+     *
+     * @param query The query to plan for execution
+     * @return A QueryRunner configured to execute the query
+     */
+    protected QueryRunner planQuery(Query query) {
+        // Create a structured query builder
+        StructuredQuery.Builder structuredQueryBuilder = StructuredQuery.newBuilder();
+        
+        // Set the collection to query
+        structuredQueryBuilder.addFrom(
+            StructuredQuery.CollectionSelector.newBuilder()
+                .setCollectionId(extractCollectionId(collectionOptions.getTableName()))
+                .build()
+        );
+        
+        // Handle field projections (select specific fields)
+        if (query.getFieldPaths() != null && !query.getFieldPaths().isEmpty()) {
+            StructuredQuery.Projection.Builder projectionBuilder = StructuredQuery.Projection.newBuilder();
+            
+            // Add each field to the projection
+            for (String fieldPath : query.getFieldPaths()) {
+                projectionBuilder.addFields(
+                    StructuredQuery.FieldReference.newBuilder()
+                        .setFieldPath(fieldPath)
+                        .build()
+                );
+            }
+        }
+        
+        // Handle query filters
+        if (query.getFilters() != null && !query.getFilters().isEmpty()) {
+            StructuredQuery.Filter filter = filtersToStructuredFilter(query.getFilters());
+            if (filter != null) {
+                structuredQueryBuilder.setWhere(filter);
+            }
+        }
+        
+        // Handle ordering
+        if (query.getOrderByField() != null && !query.getOrderByField().isEmpty()) {
+            StructuredQuery.Direction direction = query.isOrderAscending() ? 
+                StructuredQuery.Direction.ASCENDING : StructuredQuery.Direction.DESCENDING;
+            
+            structuredQueryBuilder.addOrderBy(
+                StructuredQuery.Order.newBuilder()
+                    .setField(
+                        StructuredQuery.FieldReference.newBuilder()
+                            .setFieldPath(query.getOrderByField())
+                            .build()
+                    )
+                    .setDirection(direction)
+                    .build()
+            );
+        }
+        
+        // Handle offset
+        if (query.getOffset() > 0) {
+            structuredQueryBuilder.setOffset(query.getOffset());
+        }
+        
+        // Handle limit
+        if (query.getLimit() > 0) {
+            structuredQueryBuilder.setLimit(
+                com.google.protobuf.Int32Value.newBuilder()
+                    .setValue(query.getLimit())
+                    .build()
+            );
+        }
+        
+        // Build the run query request
+        RunQueryRequest request = RunQueryRequest.newBuilder()
+            .setParent(getDatabasePath() + "/documents")
+            .setStructuredQuery(structuredQueryBuilder.build())
+            .build();
+        
+        return new QueryRunner(
+            firestoreClient,
+            request,
+            query.getBeforeQuery()
+        );
+    }
+    
+    /**
+     * Converts a list of filters to a Firestore structured filter.
+     *
+     * @param filters The list of filters to convert
+     * @return A Firestore structured filter
+     */
+    private StructuredQuery.Filter filtersToStructuredFilter(List<Filter> filters) {
+        if (filters == null || filters.isEmpty()) {
+            return null;
+        }
+
+        // Handle it specially because we don't need the composite filter condition for single filter
+        if (filters.size() == 1) {
+            return filterToStructuredFilter(filters.get(0));
+        }
+        
+        // Combine multiple filters with AND
+        StructuredQuery.CompositeFilter.Builder compositeFilter = StructuredQuery.CompositeFilter.newBuilder()
+            .setOp(StructuredQuery.CompositeFilter.Operator.AND);
+        
+        for (Filter filter : filters) {
+            StructuredQuery.Filter structuredFilter = filterToStructuredFilter(filter);
+            if (structuredFilter != null) {
+                compositeFilter.addFilters(structuredFilter);
+            }
+        }
+        
+        return StructuredQuery.Filter.newBuilder()
+            .setCompositeFilter(compositeFilter.build())
+            .build();
+    }
+    
+    /**
+     * Converts a single filter to a Firestore structured filter.
+     *
+     * @param filter The filter to convert
+     * @return A Firestore structured filter
+     */
+    private StructuredQuery.Filter filterToStructuredFilter(Filter filter) {
+        if (filter == null) {
+            return null;
+        }
+        
+        String fieldPath = filter.getFieldPath();
+        FilterOperation op = filter.getOp();
+        Object value = filter.getValue();
+        
+        // Create field reference
+        StructuredQuery.FieldReference fieldRef = StructuredQuery.FieldReference.newBuilder()
+            .setFieldPath(fieldPath)
+            .build();
+        
+        // Convert value to Firestore Value
+        Value firestoreValue = FSCodec.encodeValue(value);
+        if (firestoreValue == null) {
+            return null;
+        }
+        
+        // Map operation to Firestore operator
+        StructuredQuery.FieldFilter.Operator operator;
+        switch (op) {
+            case EQUAL:
+                operator = StructuredQuery.FieldFilter.Operator.EQUAL;
+                break;
+            case NOT_IN:
+                operator = StructuredQuery.FieldFilter.Operator.NOT_IN;
+                break;
+            case GREATER_THAN:
+                operator = StructuredQuery.FieldFilter.Operator.GREATER_THAN;
+                break;
+            case GREATER_THAN_OR_EQUAL_TO:
+                operator = StructuredQuery.FieldFilter.Operator.GREATER_THAN_OR_EQUAL;
+                break;
+            case LESS_THAN:
+                operator = StructuredQuery.FieldFilter.Operator.LESS_THAN;
+                break;
+            case LESS_THAN_OR_EQUAL_TO:
+                operator = StructuredQuery.FieldFilter.Operator.LESS_THAN_OR_EQUAL;
+                break;
+            case IN:
+                operator = StructuredQuery.FieldFilter.Operator.IN;
+                break;
+            default:
+                return null;
+        }
+        
+        return StructuredQuery.Filter.newBuilder()
+            .setFieldFilter(
+                StructuredQuery.FieldFilter.newBuilder()
+                    .setField(fieldRef)
+                    .setOp(operator)
+                    .setValue(firestoreValue)
+                    .build()
+            )
+            .build();
     }
 
     /**
      * {@inheritDoc}
      * <p>
-     * Executes a query against Firestore and returns an iterator over the results.
-     * <p>
-     * Note: This feature is currently not fully implemented.
+     * Executes a query against Firestore and returns an iterator for the results.
      *
      * @param query The query to execute
-     * @return A DocumentIterator for the query results
-     * @throws UnsupportedOperationException Currently thrown as this feature is not implemented
+     * @return An iterator for the query results
      */
     @Override
     public DocumentIterator runGetQuery(Query query) {
-        return new DocumentIterator() {
-            @Override
-            public void next(Document document) {
-
-            }
-
-            @Override
-            public boolean hasNext() {
-                return false;
-            }
-
-            @Override
-            public void stop() {
-
-            }
-        };
+        QueryRunner queryRunner = planQuery(query);
+        if (queryRunner == null) {
+            throw new SubstrateSdkException("Failed to plan query for execution");
+        }
+        
+        // Create the document iterator - offset/limit are handled in the query now
+        return new FSDocumentIterator(queryRunner, 0, 0);
     }
 
     /**
      * {@inheritDoc}
      * <p>
      * Generates a query execution plan for the given query.
-     * <p>
-     * Note: This feature is currently not fully implemented.
      *
      * @param query The query to plan
      * @return A string representation of the query plan
      */
     @Override
     public String queryPlan(Query query) {
-        return "Firestore query plan not yet implemented.";
+        QueryRunner queryRunner = planQuery(query);
+        if (queryRunner == null) {
+            return "Failed to plan query for execution";
+        }
+        return queryRunner.queryPlan();
     }
 
     /**
@@ -501,13 +933,8 @@ public class FSDocStore extends AbstractDocStore {
      */
     @Override
     public void close() {
-        try {
-            if (firestoreClient != null) {
-                firestoreClient.close();
-            }
-        } catch (Exception e) {
-            throw new UnknownException("Unable to close the connection", e);
-        }
+        executorService.shutdown();
+        firestoreClient.close();
     }
 
     /**
@@ -643,7 +1070,7 @@ public class FSDocStore extends AbstractDocStore {
 
             // Execute the batch get request
             BatchGetDocumentsRequest request = requestBuilder.build();
-            
+
             // Process each document response
             firestoreClient.batchGetDocumentsCallable().call(request).forEach(response -> {
                 if (response.hasFound()) {
@@ -661,6 +1088,21 @@ public class FSDocStore extends AbstractDocStore {
         } catch (Exception e) {
             throw new SubstrateSdkException("Error executing Firestore batch gets", e);
         }
+    }
+
+    /**
+     * Extracts the collection ID (last segment) from a full collection path.
+     *
+     * @param tableName The full collection path or name
+     * @return The collection ID (last segment of the path)
+     */
+    private String extractCollectionId(String tableName) {
+        // Handle paths that contain slash characters
+        int lastSlashIndex = tableName.lastIndexOf('/');
+        if (lastSlashIndex >= 0 && lastSlashIndex < tableName.length() - 1) {
+            return tableName.substring(lastSlashIndex + 1);
+        }
+        return tableName;
     }
 }
 

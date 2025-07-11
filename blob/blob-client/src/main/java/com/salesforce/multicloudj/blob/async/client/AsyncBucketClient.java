@@ -11,6 +11,8 @@ import com.salesforce.multicloudj.blob.driver.CopyResponse;
 import com.salesforce.multicloudj.blob.driver.DownloadRequest;
 import com.salesforce.multicloudj.blob.driver.DownloadResponse;
 import com.salesforce.multicloudj.blob.driver.ListBlobsBatch;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageRequest;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageResponse;
 import com.salesforce.multicloudj.blob.driver.ListBlobsRequest;
 import com.salesforce.multicloudj.blob.driver.MultipartPart;
 import com.salesforce.multicloudj.blob.driver.MultipartUpload;
@@ -244,6 +246,19 @@ public class AsyncBucketClient {
     }
 
     /**
+     * Retrieves a single page of blobs from the bucket with pagination support
+     *
+     * @param request The pagination request containing filters, pagination token, and max results
+     * @return ListBlobsPageResponse containing the blobs, truncation status, and next page token
+     * @throws SubstrateSdkException Thrown if the operation fails
+     */
+    public CompletableFuture<ListBlobsPageResponse> listPage(ListBlobsPageRequest request) {
+        return blobStore
+                .listPage(request)
+                .exceptionally(this::handleException);
+    }
+
+    /**
      * Initiates a multipartUpload for a Blob
      *
      * @param request Contains information about the blob to upload
@@ -337,6 +352,20 @@ public class AsyncBucketClient {
     public CompletableFuture<URL> generatePresignedUrl(PresignedUrlRequest request) {
         return blobStore
                 .generatePresignedUrl(request)
+                .exceptionally(this::handleException);
+    }
+
+    /**
+     * Determines if an object exists for a given key/versionId
+     * @param key Name of the blob to check
+     * @param versionId The version of the blob to check. This field is optional and should be null
+     *                  unless you're checking for the existence of a specific key/version blob.
+     * @return Returns true if the object exists. Returns false if it doesn't exist.
+     * @throws SubstrateSdkException Thrown if the operation fails
+     */
+    public CompletableFuture<Boolean> doesObjectExist(String key, String versionId) {
+        return blobStore
+                .doesObjectExist(key, versionId)
                 .exceptionally(this::handleException);
     }
 

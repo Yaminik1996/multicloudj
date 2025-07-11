@@ -33,6 +33,7 @@ import com.salesforce.multicloudj.blob.driver.MultipartPart;
 import com.salesforce.multicloudj.blob.driver.MultipartUpload;
 import com.salesforce.multicloudj.blob.driver.MultipartUploadRequest;
 import com.salesforce.multicloudj.blob.driver.PresignedUrlRequest;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageRequest;
 import com.salesforce.multicloudj.blob.driver.UploadPartResponse;
 import com.salesforce.multicloudj.blob.driver.UploadRequest;
 import com.salesforce.multicloudj.blob.driver.UploadResponse;
@@ -93,10 +94,10 @@ public class AliTransformer {
     }
 
     /**
-     * Reading the first 500 bytes            - computeRange(0, 500)    ->   (0, 500)
-     * Reading a middle 500 bytes             - computeRange(123, 623)  ->   (123, 623)
-     * Reading the last 500 bytes             - computeRange(null, 500) ->   (-1, 500)
-     * Reading everything but first 500 bytes - computeRange(500, null) ->   (500, -1)
+     * Reading the first 500 bytes            - computeRange(0, 500)    -   (0, 500)
+     * Reading a middle 500 bytes             - computeRange(123, 623)  -   (123, 623)
+     * Reading the last 500 bytes             - computeRange(null, 500) -   (-1, 500)
+     * Reading everything but first 500 bytes - computeRange(500, null) -   (500, -1)
      */
     protected Pair<Long, Long> computeRange(Long start, Long end) {
         return new ImmutablePair<>(start==null ? -1 : start, end==null ? -1 : end);
@@ -212,7 +213,7 @@ public class AliTransformer {
     public List<UploadPartResponse> toListUploadPartResponse(PartListing partListing) {
         return partListing.getParts().stream()
                 .sorted(Comparator.comparingInt(PartSummary::getPartNumber))
-                .map((part) -> new UploadPartResponse(part.getPartNumber(), part.getETag(), part.getSize()))
+                .map((part) -> new com.salesforce.multicloudj.blob.driver.UploadPartResponse(part.getPartNumber(), part.getETag(), part.getSize()))
                 .collect(Collectors.toList());
     }
 
@@ -243,5 +244,27 @@ public class AliTransformer {
         presignedUrlRequest.setExpiration(expirationDate);
         presignedUrlRequest.setMethod(HttpMethod.GET);
         return presignedUrlRequest;
+    }
+
+    public com.aliyun.oss.model.ListObjectsRequest toListObjectsRequest(ListBlobsPageRequest request) {
+        com.aliyun.oss.model.ListObjectsRequest listRequest = new com.aliyun.oss.model.ListObjectsRequest(bucket);
+        
+        if (request.getPrefix() != null) {
+            listRequest.setPrefix(request.getPrefix());
+        }
+        
+        if (request.getDelimiter() != null) {
+            listRequest.setDelimiter(request.getDelimiter());
+        }
+        
+        if (request.getPaginationToken() != null) {
+            listRequest.setMarker(request.getPaginationToken());
+        }
+        
+        if (request.getMaxResults() != null) {
+            listRequest.setMaxKeys(request.getMaxResults());
+        }
+        
+        return listRequest;
     }
 }

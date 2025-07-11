@@ -40,6 +40,8 @@ import com.salesforce.multicloudj.blob.driver.CopyResponse;
 import com.salesforce.multicloudj.blob.driver.DownloadRequest;
 import com.salesforce.multicloudj.blob.driver.DownloadResponse;
 import com.salesforce.multicloudj.blob.driver.ListBlobsRequest;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageRequest;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageResponse;
 import com.salesforce.multicloudj.blob.driver.MultipartPart;
 import com.salesforce.multicloudj.blob.driver.MultipartUpload;
 import com.salesforce.multicloudj.blob.driver.MultipartUploadRequest;
@@ -81,8 +83,11 @@ import java.util.NoSuchElementException;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -456,6 +461,65 @@ public class AliBlobStoreTest {
     }
 
     @Test
+    void testDoListPage() {
+        ListBlobsPageRequest request = ListBlobsPageRequest
+                .builder()
+                .withPrefix("abc")
+                .withDelimiter("/")
+                .withPaginationToken("next-token")
+                .withMaxResults(50)
+                .build();
+        
+        ObjectListing mockObjectListing = mock(ObjectListing.class);
+        when(mockOssClient.listObjects((ListObjectsRequest) any())).thenReturn(mockObjectListing);
+        List<OSSObjectSummary> list = getList();
+        when(mockObjectListing.getObjectSummaries()).thenReturn(list);
+        when(mockObjectListing.isTruncated()).thenReturn(true);
+        when(mockObjectListing.getNextMarker()).thenReturn("next-page-token");
+
+        ListBlobsPageResponse response = ali.listPage(request);
+
+        // Verify the request is mapped to the SDK
+        ArgumentCaptor<ListObjectsRequest> requestCaptor = ArgumentCaptor.forClass(ListObjectsRequest.class);
+        verify(mockOssClient, times(1)).listObjects(requestCaptor.capture());
+        ListObjectsRequest actualRequest = requestCaptor.getValue();
+        assertEquals("bucket-1", actualRequest.getBucketName());
+        assertEquals("abc", actualRequest.getPrefix());
+        assertEquals("/", actualRequest.getDelimiter());
+        assertEquals("next-token", actualRequest.getMarker());
+        assertEquals(50, actualRequest.getMaxKeys());
+
+        // Verify the response is mapped back properly
+        assertNotNull(response);
+        assertEquals(99, response.getBlobs().size()); // 1 to 99
+        assertEquals(true, response.isTruncated());
+        assertEquals("next-page-token", response.getNextPageToken());
+        
+        // Verify first and last blob
+        assertEquals("key-1", response.getBlobs().get(0).getKey());
+        assertEquals(1, response.getBlobs().get(0).getObjectSize());
+        assertEquals("key-99", response.getBlobs().get(98).getKey());
+        assertEquals(99, response.getBlobs().get(98).getObjectSize());
+    }
+
+    @Test
+    void testDoListPageEmpty() {
+        ListBlobsPageRequest request = ListBlobsPageRequest.builder().build();
+        ObjectListing mockObjectListing = mock(ObjectListing.class);
+        when(mockOssClient.listObjects((ListObjectsRequest) any())).thenReturn(mockObjectListing);
+        when(mockObjectListing.getObjectSummaries()).thenReturn(List.of());
+        when(mockObjectListing.isTruncated()).thenReturn(false);
+        when(mockObjectListing.getNextMarker()).thenReturn(null);
+
+        ListBlobsPageResponse response = ali.listPage(request);
+
+        assertNotNull(response);
+        assertEquals(0, response.getBlobs().size());
+        assertEquals(false, response.isTruncated());
+        assertNull(response.getNextPageToken());
+    }
+
+    @Test
     void testDoInitiateMultipartUpload() {
         InitiateMultipartUploadResult mockResponse = mock(InitiateMultipartUploadResult.class);
         when(mockOssClient.initiateMultipartUpload((InitiateMultipartUploadRequest) any())).thenReturn(mockResponse);
@@ -616,6 +680,21 @@ public class AliBlobStoreTest {
         assertEquals(HttpMethod.GET, actualRequest.getMethod());
         assertEquals("bucket-1", actualRequest.getBucketName());
         assertEquals("object-1", actualRequest.getKey());
+    }
+
+    @Test
+    void testDoDoesObjectExist() {
+        doReturn(true).when(mockOssClient).doesObjectExist(any(GenericRequest.class));
+
+        boolean result = ali.doDoesObjectExist("object-1", "version-1");
+
+        ArgumentCaptor<GenericRequest> requestCaptor = ArgumentCaptor.forClass(GenericRequest.class);
+        verify(mockOssClient, times(1)).doesObjectExist(requestCaptor.capture());
+        GenericRequest actualRequest = requestCaptor.getValue();
+        assertEquals("bucket-1", actualRequest.getBucketName());
+        assertEquals("object-1", actualRequest.getKey());
+        assertEquals("version-1", actualRequest.getVersionId());
+        assertTrue(result);
     }
 
     private UploadRequest getTestUploadRequest() {

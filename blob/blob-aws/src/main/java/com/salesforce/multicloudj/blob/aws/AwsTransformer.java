@@ -7,6 +7,7 @@ import com.salesforce.multicloudj.blob.driver.CopyRequest;
 import com.salesforce.multicloudj.blob.driver.DownloadRequest;
 import com.salesforce.multicloudj.blob.driver.DownloadResponse;
 import com.salesforce.multicloudj.blob.driver.ListBlobsBatch;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageRequest;
 import com.salesforce.multicloudj.blob.driver.ListBlobsRequest;
 import com.salesforce.multicloudj.blob.driver.MultipartPart;
 import com.salesforce.multicloudj.blob.driver.MultipartUpload;
@@ -93,6 +94,24 @@ public class AwsTransformer {
                 .build();
     }
 
+    public ListObjectsV2Request toRequest(ListBlobsPageRequest request) {
+        ListObjectsV2Request.Builder builder = ListObjectsV2Request
+                .builder()
+                .bucket(getBucket())
+                .delimiter(request.getDelimiter())
+                .prefix(request.getPrefix());
+
+        if (request.getMaxResults() != null) {
+            builder.maxKeys(request.getMaxResults());
+        }
+
+        if (request.getPaginationToken() != null) {
+            builder.continuationToken(request.getPaginationToken());
+        }
+
+        return builder.build();
+    }
+
     public AsyncRequestBody toAsyncRequestBody(UploadRequest uploadRequest, InputStream inputStream) {
         return AsyncRequestBody.fromInputStream(
                 inputStream,
@@ -127,10 +146,10 @@ public class AwsTransformer {
     }
 
     /**
-     * Reading the first 500 bytes            - createRangeString(0, 500)    ->   "bytes=0-500"
-     * Reading a middle 500 bytes             - createRangeString(123, 623)  ->   "bytes=123-623"
-     * Reading the last 500 bytes             - createRangeString(null, 500) ->   "bytes=-500"
-     * Reading everything but first 500 bytes - createRangeString(500, null) ->   "bytes=500-"
+     * Reading the first 500 bytes            - createRangeString(0, 500)    -   "bytes=0-500"
+     * Reading a middle 500 bytes             - createRangeString(123, 623)  -   "bytes=123-623"
+     * Reading the last 500 bytes             - createRangeString(null, 500) -   "bytes=-500"
+     * Reading everything but first 500 bytes - createRangeString(500, null) -   "bytes=500-"
      */
     protected String createRangeString(Long start, Long end) {
         return "bytes=" + (start==null ? "" : start) + "-" + (end==null ? "" : end);

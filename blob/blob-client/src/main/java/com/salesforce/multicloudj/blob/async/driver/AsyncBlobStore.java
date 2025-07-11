@@ -8,6 +8,8 @@ import com.salesforce.multicloudj.blob.driver.CopyResponse;
 import com.salesforce.multicloudj.blob.driver.DownloadRequest;
 import com.salesforce.multicloudj.blob.driver.DownloadResponse;
 import com.salesforce.multicloudj.blob.driver.ListBlobsBatch;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageRequest;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageResponse;
 import com.salesforce.multicloudj.blob.driver.ListBlobsRequest;
 import com.salesforce.multicloudj.blob.driver.MultipartPart;
 import com.salesforce.multicloudj.blob.driver.MultipartUpload;
@@ -159,6 +161,14 @@ public interface AsyncBlobStore extends SdkService {
     CompletableFuture<Void> list(ListBlobsRequest request, Consumer<ListBlobsBatch> consumer);
 
     /**
+     * Retrieves a single page of blobs from the bucket with pagination support
+     *
+     * @param request The pagination request containing filters, pagination token, and max results
+     * @return ListBlobsPageResponse containing the blobs, truncation status, and next page token
+     */
+    CompletableFuture<ListBlobsPageResponse> listPage(ListBlobsPageRequest request);
+
+    /**
      * Initiates a multipartUpload for a Blob
      *
      * @param request Contains information about the blob to upload
@@ -214,4 +224,13 @@ public interface AsyncBlobStore extends SdkService {
      * @return Returns the presigned URL
      */
     CompletableFuture<URL> generatePresignedUrl(PresignedUrlRequest request);
+
+    /**
+     * Determines if an object exists for a given key/versionId
+     * @param key Name of the blob to check
+     * @param versionId The version of the blob to check. This field is optional and should be null
+     *                  unless you're checking for the existence of a specific key/version blob.
+     * @return Returns true if the object exists. Returns false if it doesn't exist.
+     */
+    CompletableFuture<Boolean> doesObjectExist(String key, String versionId);
 }

@@ -16,6 +16,7 @@ import com.aliyun.oss.model.InitiateMultipartUploadRequest;
 import com.aliyun.oss.model.InitiateMultipartUploadResult;
 import com.aliyun.oss.model.ListPartsRequest;
 import com.aliyun.oss.model.OSSObject;
+import com.aliyun.oss.model.ObjectListing;
 import com.aliyun.oss.model.PartListing;
 import com.aliyun.oss.model.PutObjectRequest;
 import com.aliyun.oss.model.TagSet;
@@ -31,6 +32,8 @@ import com.salesforce.multicloudj.blob.driver.CopyRequest;
 import com.salesforce.multicloudj.blob.driver.CopyResponse;
 import com.salesforce.multicloudj.blob.driver.DownloadRequest;
 import com.salesforce.multicloudj.blob.driver.DownloadResponse;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageRequest;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageResponse;
 import com.salesforce.multicloudj.blob.driver.ListBlobsRequest;
 import com.salesforce.multicloudj.blob.driver.MultipartPart;
 import com.salesforce.multicloudj.blob.driver.MultipartUpload;
@@ -83,7 +86,7 @@ public class AliBlobStore extends AbstractBlobStore<AliBlobStore> {
 
     @Override
     public Provider.Builder builder() {
-        return new Builder();
+        return new AliBlobStore.Builder();
     }
 
     @Override
@@ -310,6 +313,31 @@ public class AliBlobStore extends AbstractBlobStore<AliBlobStore> {
     }
 
     /**
+     * Lists a single page of objects in the bucket with pagination support
+     *
+     * @param request The list request containing filters and optional pagination token
+     * @return ListBlobsPageResult containing the blobs, truncation status, and next page token
+     */
+    @Override
+    protected ListBlobsPageResponse doListPage(ListBlobsPageRequest request) {
+        com.aliyun.oss.model.ListObjectsRequest listRequest = transformer.toListObjectsRequest(request);
+        ObjectListing response = ossClient.listObjects(listRequest);
+        
+        List<BlobInfo> blobs = response.getObjectSummaries().stream()
+                .map(objSum -> new BlobInfo.Builder()
+                        .withKey(objSum.getKey())
+                        .withObjectSize(objSum.getSize())
+                        .build())
+                .collect(Collectors.toList());
+
+        return new ListBlobsPageResponse(
+                blobs,
+                response.isTruncated(),
+                response.getNextMarker()
+        );
+    }
+
+    /**
      * Initiates a multipart upload
      *
      * @param request the multipart request
@@ -408,6 +436,17 @@ public class AliBlobStore extends AbstractBlobStore<AliBlobStore> {
         throw new InvalidArgumentException("Unsupported PresignedOperation. type="+request.getType());
     }
 
+    /**
+     * Determines if an object exists for a given key/versionId
+     * @param key Name of the blob to check
+     * @param versionId The version of the blob to check
+     * @return Returns true if the object exists. Returns false if it doesn't exist.
+     */
+    @Override
+    protected boolean doDoesObjectExist(String key, String versionId) {
+        return ossClient.doesObjectExist(transformer.toMetadataRequest(key, versionId));
+    }
+
     @Getter
     public static class Builder extends AbstractBlobStore.Builder<AliBlobStore> {
 
@@ -418,8 +457,18 @@ public class AliBlobStore extends AbstractBlobStore<AliBlobStore> {
             providerId(AliConstants.PROVIDER_ID);
         }
 
+        public Builder withClient(OSS client) {
+            this.client = client;
+            return this;
+        }
+
+        public Builder withTransformerSupplier(AliTransformerSupplier transformerSupplier) {
+            this.transformerSupplier = transformerSupplier;
+            return this;
+        }
+
         /**
-         * Helper function to generate the OSS Client
+         * Helper function for generating the OSS client
          */
         private static OSS buildOSSClient(Builder builder) {
             return OSSClientBuilder.create()
@@ -465,18 +514,9 @@ public class AliBlobStore extends AbstractBlobStore<AliBlobStore> {
             return clientBuilderConfiguration;
         }
 
-        public Builder withClient(OSS client) {
-            this.client = client;
-            return this;
-        }
-
-        public Builder withTransformerSupplier(AliTransformerSupplier transformerSupplier) {
-            this.transformerSupplier = transformerSupplier;
-            return this;
-        }
-
         @Override
         public AliBlobStore build() {
+            OSS client = getClient();
             if(client == null) {
                 client = buildOSSClient(this);
             }

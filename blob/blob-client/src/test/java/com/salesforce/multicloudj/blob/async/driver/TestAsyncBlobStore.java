@@ -9,6 +9,8 @@ import com.salesforce.multicloudj.blob.driver.CopyResponse;
 import com.salesforce.multicloudj.blob.driver.DownloadRequest;
 import com.salesforce.multicloudj.blob.driver.DownloadResponse;
 import com.salesforce.multicloudj.blob.driver.ListBlobsBatch;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageRequest;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageResponse;
 import com.salesforce.multicloudj.blob.driver.ListBlobsRequest;
 import com.salesforce.multicloudj.blob.driver.MultipartPart;
 import com.salesforce.multicloudj.blob.driver.MultipartUpload;
@@ -114,6 +116,11 @@ public class TestAsyncBlobStore extends AbstractAsyncBlobStore {
     }
 
     @Override
+    protected CompletableFuture<ListBlobsPageResponse> doListPage(ListBlobsPageRequest request) {
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
     protected CompletableFuture<MultipartUpload> doInitiateMultipartUpload(MultipartUploadRequest request) {
         return null;
     }
@@ -150,6 +157,11 @@ public class TestAsyncBlobStore extends AbstractAsyncBlobStore {
 
     @Override
     protected CompletableFuture<URL> doGeneratePresignedUrl(PresignedUrlRequest request) {
+        return null;
+    }
+
+    @Override
+    protected CompletableFuture<Boolean> doDoesObjectExist(String key, String versionId) {
         return null;
     }
 

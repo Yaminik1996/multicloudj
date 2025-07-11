@@ -9,6 +9,8 @@ import com.salesforce.multicloudj.blob.driver.CopyResponse;
 import com.salesforce.multicloudj.blob.driver.DownloadRequest;
 import com.salesforce.multicloudj.blob.driver.DownloadResponse;
 import com.salesforce.multicloudj.blob.driver.ListBlobsBatch;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageRequest;
+import com.salesforce.multicloudj.blob.driver.ListBlobsPageResponse;
 import com.salesforce.multicloudj.blob.driver.ListBlobsRequest;
 import com.salesforce.multicloudj.blob.driver.MultipartPart;
 import com.salesforce.multicloudj.blob.driver.MultipartUpload;
@@ -180,6 +182,14 @@ public abstract class AbstractAsyncBlobStore implements AsyncBlobStore {
      * {@inheritDoc}
      */
     @Override
+    public CompletableFuture<ListBlobsPageResponse> listPage(ListBlobsPageRequest request) {
+        return doListPage(request);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public CompletableFuture<MultipartUpload> initiateMultipartUpload(MultipartUploadRequest request) {
         return doInitiateMultipartUpload(request);
     }
@@ -248,6 +258,15 @@ public abstract class AbstractAsyncBlobStore implements AsyncBlobStore {
         return doGeneratePresignedUrl(request);
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public CompletableFuture<Boolean> doesObjectExist(String key, String versionId) {
+        validator.validateKey(key);
+        return doDoesObjectExist(key, versionId);
+    }
+
     protected abstract CompletableFuture<UploadResponse> doUpload(UploadRequest uploadRequest, InputStream inputStream);
 
     protected abstract CompletableFuture<UploadResponse> doUpload(UploadRequest uploadRequest, byte[] content);
@@ -274,6 +293,8 @@ public abstract class AbstractAsyncBlobStore implements AsyncBlobStore {
 
     protected abstract CompletableFuture<Void> doList(ListBlobsRequest request, Consumer<ListBlobsBatch> consumer);
 
+    protected abstract CompletableFuture<ListBlobsPageResponse> doListPage(ListBlobsPageRequest request);
+
     protected abstract CompletableFuture<MultipartUpload> doInitiateMultipartUpload(MultipartUploadRequest request);
 
     protected abstract CompletableFuture<UploadPartResponse> doUploadMultipartPart(MultipartUpload mpu, MultipartPart mpp);
@@ -289,4 +310,6 @@ public abstract class AbstractAsyncBlobStore implements AsyncBlobStore {
     protected abstract CompletableFuture<Void> doSetTags(String key, Map<String, String> tags);
 
     protected abstract CompletableFuture<URL> doGeneratePresignedUrl(PresignedUrlRequest request);
+
+    protected abstract CompletableFuture<Boolean> doDoesObjectExist(String key, String versionId);
 }
