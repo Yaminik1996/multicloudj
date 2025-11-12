@@ -76,6 +76,11 @@ public class TestIam extends AbstractIam<TestIam> {
         return new Builder();
     }
 
+    @Override
+    public void close() throws Exception {
+        // Mock implementation - no resources to close
+    }
+
     public static class Builder extends AbstractIam.Builder<TestIam, Builder> {
         public Builder() {
             providerId("mockProviderId");

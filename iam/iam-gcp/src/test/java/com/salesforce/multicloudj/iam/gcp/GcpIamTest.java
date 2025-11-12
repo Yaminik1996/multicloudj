@@ -255,7 +255,18 @@ public class GcpIamTest {
     Assertions.assertInstanceOf(GcpIam.Builder.class, builder);
   }
 
+  @Test
+  void testClose() throws Exception {
+    gcpIam.close();
+    verify(mockProjectsClient, times(1)).close();
+  }
 
+  @Test
+  void testCloseWithException() throws Exception {
+    Mockito.doThrow(new IOException("Close failed")).when(mockProjectsClient).close();
+    Assertions.assertThrows(IOException.class, () -> gcpIam.close());
+    verify(mockProjectsClient, times(1)).close();
+  }
 
   private void assertExceptionMapping(StatusCode.Code statusCode,
       Class<? extends SubstrateSdkException> expectedExceptionClass) {
