@@ -159,10 +159,31 @@ public class GcpIam extends AbstractIam<GcpIam> {
         throw new UnSupportedOperationException("doGetInlinePolicyDetails not yet implemented for GCP");
     }
 
+    /**
+    * Retrieves all policies (roles) attached to a service account.
+    * In GCP, "attached policies" are the IAM roles that have been granted to the service account
+    * through bindings in the project's IAM policy.
+    *
+    * @param identityName the service account email (e.g., "my-sa@project.iam.gserviceaccount.com")
+    * @param tenantId the project resource name (e.g., "projects/my-project")
+    * @param region the region (optional for GCP)
+    * @return a list of role names (e.g., "roles/iam.serviceAccountUser", "roles/storage.objectViewer")
+    */
     @Override
     protected List<String> doGetAttachedPolicies(String identityName, String tenantId, String region) {
-        // TODO: Implement GCP attached policies retrieval
-        throw new UnSupportedOperationException("doGetAttachedPolicies not yet implemented for GCP");
+    // Get the current IAM policy for the project
+    GetIamPolicyRequest getRequest = GetIamPolicyRequest.newBuilder()
+        .setResource(tenantId)
+        .build();
+    Policy policy = projectsClient.getIamPolicy(getRequest);
+    if (policy == null) {
+      return List.of();
+    }
+    String member = "serviceAccount:" + identityName;
+    return policy.getBindingsList().stream()
+        .filter(binding -> binding.getMembersList().contains(member))
+        .map(Binding::getRole)
+        .collect(Collectors.toList());
     }
 
     @Override
@@ -194,26 +215,27 @@ public class GcpIam extends AbstractIam<GcpIam> {
 
     @Override
     public Builder builder() {
-    return new Builder();
-  }
+        return new Builder();
+    }
 
+    @Override
     public void close() throws Exception {
         projectsClient.close();
     }
 
     public static class Builder extends AbstractIam.Builder<GcpIam, Builder> {
         protected Builder() {
-      providerId(GcpConstants.PROVIDER_ID);
-    }
+            providerId(GcpConstants.PROVIDER_ID);
+        }
 
         @Override
         public Builder self() {
-      return this;
-    }
+            return this;
+        }
 
         @Override
         public GcpIam build() {
-      return new GcpIam(this);
-    }
+            return new GcpIam(this);
+        }
     }
 }
