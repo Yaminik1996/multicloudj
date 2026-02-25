@@ -463,7 +463,7 @@ public class GcpBlobStore extends AbstractBlobStore {
             if (e.getCode() == 404) {
                 throw new ResourceNotFoundException("Bucket not found: " + bucket, e);
             }
-            throw new SubstrateSdkException("Failed to check bucket existence", e);
+            throw new UnknownException("Failed to check bucket existence", e);
         }
     }
 
