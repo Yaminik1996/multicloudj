@@ -16,6 +16,7 @@ import com.salesforce.multicloudj.blob.driver.DownloadResponse;
 import com.salesforce.multicloudj.blob.driver.ListBlobsPageRequest;
 import com.salesforce.multicloudj.blob.driver.ListBlobsPageResponse;
 import com.salesforce.multicloudj.blob.driver.ListBlobsRequest;
+import com.salesforce.multicloudj.blob.driver.ListObjectVersionsRequest;
 import com.salesforce.multicloudj.blob.driver.MultipartPart;
 import com.salesforce.multicloudj.blob.driver.MultipartUpload;
 import com.salesforce.multicloudj.blob.driver.MultipartUploadRequest;
@@ -4985,5 +4986,54 @@ public abstract class AbstractBlobStoreIT {
     } finally {
       safeDeleteBlobs(bucketClient, expectedKey);
     }
+  }
+
+  @Test
+  public void testListObjectVersions_happy() throws IOException {
+    AbstractBlobStore blobStore = harness.createBlobStore(true, true, true);
+    BucketClient bucketClient = new BucketClient(blobStore);
+    String key = "conformance-tests/list-object-versions/archived-blob";
+
+    try {
+      byte[] blobBytes = "archived content".getBytes(StandardCharsets.UTF_8);
+      try (InputStream inputStream = new ByteArrayInputStream(blobBytes)) {
+        UploadRequest request =
+            new UploadRequest.Builder().withKey(key).withContentLength(blobBytes.length).build();
+        bucketClient.upload(request, inputStream);
+      }
+
+      bucketClient.delete(key, null);
+
+      Iterator<BlobMetadata> iterator =
+          bucketClient.listObjectVersions(
+              ListObjectVersionsRequest.builder().withKey(key).withMaxResults(10).build());
+
+      List<BlobMetadata> versions = new ArrayList<>();
+      while (iterator.hasNext()) {
+        versions.add(iterator.next());
+      }
+
+      Assertions.assertFalse(versions.isEmpty(), "Expected at least one object version");
+      Assertions.assertTrue(
+          versions.stream().allMatch(version -> key.equals(version.getKey())),
+          "All listed versions should match the requested key");
+      Assertions.assertTrue(
+          versions.stream().anyMatch(version -> StringUtils.isNotBlank(version.getVersionId())),
+          "At least one listed version should have a non-empty versionId");
+    } finally {
+      safeDeleteBlobs(bucketClient, key);
+    }
+  }
+
+  @Test
+  public void testListObjectVersions_nullKey() {
+    AbstractBlobStore blobStore = harness.createBlobStore(true, true, true);
+    BucketClient bucketClient = new BucketClient(blobStore);
+
+    Assertions.assertThrows(
+        InvalidArgumentException.class,
+        () ->
+            bucketClient.listObjectVersions(
+                ListObjectVersionsRequest.builder().withKey(null).build()));
   }
 }

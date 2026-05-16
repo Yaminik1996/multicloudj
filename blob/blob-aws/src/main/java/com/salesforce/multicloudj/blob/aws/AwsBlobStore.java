@@ -424,6 +424,64 @@ public class AwsBlobStore extends AbstractBlobStore {
         blobs, commonPrefixes, response.isTruncated(), response.nextContinuationToken());
   }
 
+  @Override
+  protected Iterator<BlobMetadata> doListObjectVersions(
+      com.salesforce.multicloudj.blob.driver.ListObjectVersionsRequest request) {
+    software.amazon.awssdk.services.s3.model.ListObjectVersionsRequest.Builder awsRequestBuilder =
+        software.amazon.awssdk.services.s3.model.ListObjectVersionsRequest.builder()
+            .bucket(getBucket())
+            .prefix(request.getKey());
+    if (request.getMaxResults() != null) {
+      awsRequestBuilder.maxKeys(request.getMaxResults());
+    }
+
+    Iterator<ListObjectVersionsResponse> responseIterator =
+        s3Client.listObjectVersionsPaginator(awsRequestBuilder.build()).iterator();
+
+    return new Iterator<>() {
+      private Iterator<ObjectVersion> current = List.<ObjectVersion>of().iterator();
+      private BlobMetadata next;
+
+      @Override
+      public boolean hasNext() {
+        if (next != null) {
+          return true;
+        }
+        while (true) {
+          while (current.hasNext()) {
+            ObjectVersion version = current.next();
+            if (!request.getKey().equals(version.key())) {
+              continue;
+            }
+            next =
+                BlobMetadata.builder()
+                    .key(version.key())
+                    .versionId(version.versionId())
+                    .eTag(version.eTag())
+                    .objectSize(version.size())
+                    .lastModified(version.lastModified())
+                    .build();
+            return true;
+          }
+          if (!responseIterator.hasNext()) {
+            return false;
+          }
+          current = responseIterator.next().versions().iterator();
+        }
+      }
+
+      @Override
+      public BlobMetadata next() {
+        if (!hasNext()) {
+          throw new java.util.NoSuchElementException();
+        }
+        BlobMetadata result = next;
+        next = null;
+        return result;
+      }
+    };
+  }
+
   /**
    * Initiates a multipart upload
    *

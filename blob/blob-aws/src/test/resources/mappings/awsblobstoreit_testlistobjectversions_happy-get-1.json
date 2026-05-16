@@ -1,0 +1,44 @@
+{
+  "id" : "ad636531-5134-42d7-8099-a55536110fc3",
+  "name" : "AwsBlobStoreIT_testListObjectVersions_happy-GET-1",
+  "request" : {
+    "urlPath" : "/chameleon-jcloud-versioned",
+    "method" : "GET",
+    "headers" : {
+      "X-Query-Param-Count" : {
+        "equalTo" : "3"
+      }
+    },
+    "queryParameters" : {
+      "versions" : {
+        "hasExactly" : [ {
+          "equalTo" : ""
+        } ]
+      },
+      "max-keys" : {
+        "hasExactly" : [ {
+          "equalTo" : "10"
+        } ]
+      },
+      "prefix" : {
+        "hasExactly" : [ {
+          "equalTo" : "conformance-tests/list-object-versions/archived-blob"
+        } ]
+      }
+    }
+  },
+  "response" : {
+    "status" : 200,
+    "body" : "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListVersionsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>chameleon-jcloud-versioned</Name><Prefix>conformance-tests/list-object-versions/archived-blob</Prefix><KeyMarker></KeyMarker><VersionIdMarker></VersionIdMarker><MaxKeys>10</MaxKeys><IsTruncated>false</IsTruncated><DeleteMarker><Key>conformance-tests/list-object-versions/archived-blob</Key><VersionId>Iy78noSaXgf3aa1NInRqMmDmLriTH9Fi</VersionId><IsLatest>true</IsLatest><LastModified>2026-05-15T23:48:07.000Z</LastModified><Owner><ID>b6eaab2af32ba61bce00b8c9aceaa1c649844388ec2c3827bbd3e2b06f798cf1</ID></Owner></DeleteMarker><Version><Key>conformance-tests/list-object-versions/archived-blob</Key><VersionId>JnDfgeyb3QnTTW1QgAGG4EHamWpbHIiJ</VersionId><IsLatest>false</IsLatest><LastModified>2026-05-15T23:48:07.000Z</LastModified><ETag>&quot;a98871894645d06a06364efe6b42af9d&quot;</ETag><ChecksumAlgorithm>CRC64NVME</ChecksumAlgorithm><ChecksumType>FULL_OBJECT</ChecksumType><Size>16</Size><Owner><ID>b6eaab2af32ba61bce00b8c9aceaa1c649844388ec2c3827bbd3e2b06f798cf1</ID></Owner><StorageClass>STANDARD</StorageClass></Version><DeleteMarker><Key>conformance-tests/list-object-versions/archived-blob</Key><VersionId>oNLOJ1LDGuJrm_TmFMTFmBqivDn9NmOl</VersionId><IsLatest>false</IsLatest><LastModified>2026-05-15T23:47:20.000Z</LastModified><Owner><ID>b6eaab2af32ba61bce00b8c9aceaa1c649844388ec2c3827bbd3e2b06f798cf1</ID></Owner></DeleteMarker><DeleteMarker><Key>conformance-tests/list-object-versions/archived-blob</Key><VersionId>ppfAblQLAqZZHOvWiO5j8B5VGTWiAKX9</VersionId><IsLatest>false</IsLatest><LastModified>2026-05-15T23:47:19.000Z</LastModified><Owner><ID>b6eaab2af32ba61bce00b8c9aceaa1c649844388ec2c3827bbd3e2b06f798cf1</ID></Owner></DeleteMarker><Version><Key>conformance-tests/list-object-versions/archived-blob</Key><VersionId>Hh5tqLuzif3bzFDrInesrhY6vtZDU.G5</VersionId><IsLatest>false</IsLatest><LastModified>2026-05-15T23:47:19.000Z</LastModified><ETag>&quot;a98871894645d06a06364efe6b42af9d&quot;</ETag><ChecksumAlgorithm>CRC64NVME</ChecksumAlgorithm><ChecksumType>FULL_OBJECT</ChecksumType><Size>16</Size><Owner><ID>b6eaab2af32ba61bce00b8c9aceaa1c649844388ec2c3827bbd3e2b06f798cf1</ID></Owner><StorageClass>STANDARD</StorageClass></Version></ListVersionsResult>",
+    "headers" : {
+      "Server" : "AmazonS3",
+      "x-amz-request-id" : "5037C4H924V2GXZP",
+      "x-amz-id-2" : "s0OnOL27g9aF+E8y674R1P9Lb6gj8lYAEAa723i8tyhSbsSP1dmvdKqwz2oCkLCm0bqUdbWF8HQDiMVgexvsLa1qsxRIuRD/jmyTNSQLMvo=",
+      "Date" : "Fri, 15 May 2026 23:48:07 GMT",
+      "Content-Type" : "application/xml"
+    }
+  },
+  "uuid" : "ad636531-5134-42d7-8099-a55536110fc3",
+  "persistent" : true,
+  "insertionIndex" : 740
+}

@@ -4485,4 +4485,37 @@ class GcpBlobStoreTest {
         com.salesforce.multicloudj.common.exceptions.FailedPreconditionException.class,
         () -> gcpBlobStore.updateObjectRetention(key, null, cfg));
   }
+
+  @Test
+  void testDoListObjectVersions() {
+    com.salesforce.multicloudj.blob.driver.ListObjectVersionsRequest request =
+        com.salesforce.multicloudj.blob.driver.ListObjectVersionsRequest.builder()
+            .withKey(TEST_KEY)
+            .withMaxResults(10)
+            .build();
+
+    Blob matchingBlob = mock(Blob.class);
+    when(matchingBlob.getName()).thenReturn(TEST_KEY);
+    when(matchingBlob.getGeneration()).thenReturn(12345L);
+    when(matchingBlob.getEtag()).thenReturn(TEST_ETAG);
+    when(matchingBlob.getSize()).thenReturn(100L);
+
+    Blob nonMatchingBlob = mock(Blob.class);
+    when(nonMatchingBlob.getName()).thenReturn(TEST_KEY + "-extra");
+
+    @SuppressWarnings("unchecked")
+    Page<Blob> page = mock(Page.class);
+    when(page.iterateAll()).thenReturn(List.of(matchingBlob, nonMatchingBlob));
+    when(mockStorage.list(eq(TEST_BUCKET), any(Storage.BlobListOption[].class))).thenReturn(page);
+
+    Iterator<BlobMetadata> versions = gcpBlobStore.listObjectVersions(request);
+
+    assertTrue(versions.hasNext());
+    BlobMetadata metadata = versions.next();
+    assertEquals(TEST_KEY, metadata.getKey());
+    assertEquals("12345", metadata.getVersionId());
+    assertEquals(TEST_ETAG, metadata.getETag());
+    assertEquals(100L, metadata.getObjectSize());
+    assertFalse(versions.hasNext());
+  }
 }
